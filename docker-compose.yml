@@ -1,0 +1,7 @@
+services:
+  coder-agent:
+    build: .
+    env_file: .env
+    volumes:
+      - ./workspace:/app/workspace
+    command: python -m orchestration.graph
