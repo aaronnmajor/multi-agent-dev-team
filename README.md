@@ -5,15 +5,18 @@
 A LangGraph-based autonomous software development team. The system grows weekly:
 Week 1 is a single Coder Agent; by Week 5 it is a PM + Coder + QA team with shared state, feedback loops, and production hardening.
 
-## Current state (Week 1: Coder Agent v1.0)
+## Current state (Week 2: Multi-Agent System v2.0)
 
-A single autonomous Coder Agent that:
+A two-agent system built on LangGraph shared state:
 
-- Accepts a natural-language coding task
-- Plans its approach (chain-of-thought in the first assistant turn)
-- Writes and executes Python code using sandboxed tools
-- Self-corrects based on execution output
-- Returns structured Pydantic output with four fields: `code`, `explanation`, `plan`, `result`
+- **PM Agent** — converts a raw user requirement into a Markdown tech spec and a JSON task list.
+- **Coder Agent** — picks tasks off the shared state one at a time, writes code, executes it, and stores the artifact back in state. Self-loops until all tasks are complete.
+
+The graph is `START → PM → (conditional) → Coder → (self-loop until done) → END`. All state lives in a typed `ProjectState` dict; the `tasks` and `artifacts` fields use `Annotated[list, add]` reducers so values accumulate across agent turns rather than overwrite.
+
+### Week 1 still available
+
+The single-agent Coder (`agents.CoderAgent`) is retained unchanged — it accepts a coding task directly and returns a validated `AgentOutput` with the four required fields (`code`, `explanation`, `plan`, `result`).
 
 ## Requirements
 
@@ -37,13 +40,23 @@ cp .env.example .env
 
 ## Usage
 
-### Run the agent directly
+### Run the full multi-agent graph (Week 2)
 
 ```bash
 python -m orchestration.graph
+# or with a custom requirement:
+python -m orchestration.graph "Build a CLI that reverses the lines of a text file."
 ```
 
-Runs the demo task (a `word_frequency` function). Prints the structured `AgentOutput` as JSON.
+Runs the PM → Coder pipeline end-to-end: the PM produces a spec and task list, the coder works through the tasks one at a time, and the final state is printed (spec, tasks, artifacts).
+
+### Run the single Coder Agent (Week 1)
+
+```bash
+python -m agents.coder_agent
+```
+
+Skips the PM step and runs the demo coding task directly. Prints `AgentOutput` as JSON.
 
 ### Run the smoke test
 
@@ -67,17 +80,19 @@ docker compose up --build
 
 ```
 multi-agent-dev-team/
-├── agents/                  # One module per agent (Coder now; PM + QA in later weeks)
-│   └── coder_agent.py
+├── agents/                  # One module per agent
+│   ├── coder_agent.py       # CoderAgent class (W1) + coder_node (W2)
+│   └── pm_agent.py          # PM agent: requirement -> spec -> tasks (W2)
 ├── tools/                   # Shared tool definitions
 │   ├── file_io.py           # read_file, write_file
 │   └── code_executor.py     # exec_python (subprocess sandbox)
 ├── memory.py                # SlidingWindowBuffer + Chroma SemanticMemory
 ├── orchestration/           # LangGraph graph + state schemas
-│   ├── graph.py             # Entry point and wiring
-│   └── state.py             # Pydantic AgentState, AgentOutput
+│   ├── graph.py             # Multi-agent graph + entry point
+│   └── state.py             # ProjectState TypedDict, Pydantic AgentOutput
 ├── tests/                   # Smoke + unit tests
-│   └── test_smoke.py
+│   ├── test_smoke.py        # W1 end-to-end (LLM)
+│   └── test_multi_agent.py  # W2 PM + routers + graph (mocked)
 ├── docs/
 │   └── architecture.md
 ├── .env.example

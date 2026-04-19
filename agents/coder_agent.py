@@ -1,20 +1,15 @@
 """
-Coder Agent v1.0 — Week 1 project deliverable.
+Coder Agent — Week 1 standalone + Week 2 multi-agent node.
 
-A single autonomous agent that:
-  - Accepts a natural-language coding task
-  - Plans its approach, decomposing via chain-of-thought
-  - Uses file I/O and sandboxed code execution tools
-  - Returns structured Pydantic output (code, explanation, plan, result)
-
-Implemented with LangGraph (StateGraph + ToolNode) using native function-calling.
-Memory is a two-tier system (sliding-window short-term + Chroma long-term).
+Week 1: CoderAgent class runs a single task end-to-end and returns AgentOutput.
+Week 2: coder_node(state) processes one task from ProjectState, writes an artifact back,
+        and sets routing to "coder" (more tasks remain) or "done" (all tasks complete).
 """
 
 from __future__ import annotations
 
 import os
-from typing import Annotated, TypedDict
+from typing import Annotated, Any, TypedDict
 
 from dotenv import load_dotenv
 from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
@@ -24,13 +19,14 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
 from memory import SemanticMemory, SlidingWindowBuffer
-from orchestration.state import AgentOutput
+from orchestration.state import AgentOutput, CodingArtifact, ProjectState
 from tools import exec_python, read_file, write_file
 
 load_dotenv(override=True)
 
 MODEL = "gpt-4.1-mini"
 MAX_ITERATIONS = 10
+MAX_REACT_ITERATIONS = 8  # Week 2: per-task cap to prevent loops
 
 SYSTEM_PROMPT = """You are an autonomous Coder Agent. Your job is to complete Python coding tasks.
 
@@ -57,15 +53,12 @@ TOOLS = [read_file, write_file, exec_python]
 
 
 class AgentGraphState(TypedDict):
-    """LangGraph state: accumulates messages through add_messages reducer."""
-
     messages: Annotated[list[AnyMessage], add_messages]
     task: str
     iterations: int
 
 
 def _build_llm() -> ChatOpenAI:
-    """Build the LLM client with tools bound, routed through Helicone."""
     return ChatOpenAI(
         model=MODEL,
         api_key=os.getenv("OPENROUTER_API_KEY"),
@@ -75,7 +68,6 @@ def _build_llm() -> ChatOpenAI:
 
 
 def _agent_node(state: AgentGraphState, llm=None) -> dict:
-    """Single LLM call. Increments iteration counter."""
     if llm is None:
         llm = _build_llm()
     response = llm.invoke(state["messages"])
@@ -86,7 +78,6 @@ def _agent_node(state: AgentGraphState, llm=None) -> dict:
 
 
 def _should_continue(state: AgentGraphState) -> str:
-    """Loop guard: route to tools if the LLM requested them, end otherwise or at max iter."""
     if state.get("iterations", 0) >= MAX_ITERATIONS:
         return END
     last = state["messages"][-1]
@@ -96,7 +87,7 @@ def _should_continue(state: AgentGraphState) -> str:
 
 
 def build_coder_graph():
-    """Construct the LangGraph StateGraph for the Coder Agent."""
+    """Construct the single-agent LangGraph used by the Week 1 CoderAgent wrapper."""
     workflow = StateGraph(AgentGraphState)
     workflow.add_node("agent", _agent_node)
     workflow.add_node("tools", ToolNode(TOOLS))
@@ -107,7 +98,7 @@ def build_coder_graph():
 
 
 class CoderAgent:
-    """High-level wrapper that runs the graph and produces structured output."""
+    """Week 1 wrapper: run the graph on a task and return structured output."""
 
     def __init__(self) -> None:
         self.graph = build_coder_graph()
@@ -124,7 +115,6 @@ class CoderAgent:
         return f"{SYSTEM_PROMPT}\n\n## Relevant memories from prior runs\n\n{memory_block}\n"
 
     def run(self, task: str) -> AgentOutput:
-        """Run the agent on a task and return structured output."""
         system_prompt = self._build_system_prompt(task)
         initial_state: AgentGraphState = {
             "messages": [
@@ -136,7 +126,6 @@ class CoderAgent:
         }
 
         final_state = self.graph.invoke(initial_state, {"recursion_limit": 50})
-
         iterations_used = final_state.get("iterations", 0)
         stopped_early = iterations_used >= MAX_ITERATIONS
 
@@ -153,12 +142,10 @@ class CoderAgent:
         )
 
         self.long_term.store(f"Task: {task}\nOutcome: {explanation[:500]}")
-
         return output
 
     @staticmethod
     def _extract_artifacts(messages: list) -> tuple[str, str]:
-        """Pull the last write_file content and the last exec_python result from the message log."""
         code = ""
         result = ""
         for msg in messages:
@@ -174,7 +161,6 @@ class CoderAgent:
 
     @staticmethod
     def _extract_explanation_and_plan(messages: list) -> tuple[str, str]:
-        """Use the first assistant text (the plan) and the last assistant text (the explanation)."""
         assistant_texts = [
             m.content for m in messages
             if getattr(m, "type", None) == "ai" and getattr(m, "content", None)
@@ -186,6 +172,59 @@ class CoderAgent:
         return explanation, plan
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Week 2: coder_node for the multi-agent ProjectState graph
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _task_instruction(task: dict, spec: str) -> str:
+    """Format a single coding task into an instruction for the coder ReACT loop."""
+    return (
+        f"Tech spec (for context):\n{spec}\n\n"
+        f"---\nCurrent task: {task['title']} ({task['task_id']})\n"
+        f"Description: {task['description']}\n"
+        f"Acceptance criteria: {task['acceptance_criteria']}\n"
+        f"Target file: {task['file']}\n\n"
+        "Implement the task, write the file to the workspace, execute it (or an appropriate test), "
+        "and then summarise what you did."
+    )
+
+
+def coder_node(state: ProjectState) -> dict[str, Any]:
+    """LangGraph node: process one task from the shared state.
+
+    Reads `tasks[current_task_index]`, runs the single-agent graph on it,
+    writes the resulting artifact back, increments the task index, and sets
+    routing to "coder" if more tasks remain or "done" if the queue is drained.
+    """
+    tasks = state.get("tasks", [])
+    idx = state.get("current_task_index", 0)
+
+    if idx >= len(tasks):
+        return {"routing": "done"}
+
+    task = tasks[idx]
+    spec = state.get("tech_spec", "")
+
+    agent = CoderAgent()
+    output = agent.run(_task_instruction(task, spec))
+
+    artifact: CodingArtifact = {
+        "task_id":     task["task_id"],
+        "file":        task["file"],
+        "content":     output.code,
+        "exec_result": output.result,
+    }
+
+    next_idx = idx + 1
+    done = next_idx >= len(tasks)
+
+    return {
+        "artifacts": [artifact],
+        "current_task_index": next_idx,
+        "routing": "done" if done else "coder",
+    }
+
+
 if __name__ == "__main__":
     DEMO_TASK = (
         "Write a Python function word_frequency(text: str) -> dict that returns a case-insensitive "
@@ -194,9 +233,4 @@ if __name__ == "__main__":
     )
     agent = CoderAgent()
     output = agent.run(DEMO_TASK)
-    print("=" * 60)
-    print(f"CODE ({len(output.code)} chars):\n{output.code[:500]}...")
-    print(f"\nPLAN:\n{output.plan[:500]}")
-    print(f"\nEXPLANATION:\n{output.explanation[:500]}")
-    print(f"\nRESULT:\n{output.result[:500]}")
-    print(f"\nIterations: {output.iterations_used} | Stopped early: {output.stopped_early}")
+    print(output.model_dump_json(indent=2))

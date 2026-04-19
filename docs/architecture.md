@@ -1,5 +1,55 @@
 # Architecture — Multi-Agent Dev Team
 
+## Week 2: Multi-Agent System v2.0 (current)
+
+PM Agent hands off to Coder Agent via shared `ProjectState` on a LangGraph StateGraph.
+
+```
+  START
+    |
+    v
++-------+      (routing == "coder")     +---------+
+|  pm   | ---------------------------> |  coder  | <-+
++-------+                               +---------+   |
+    |                                       |         |
+    | (routing == "error")                  |         |
+    v                                       | (routing == "coder", more tasks)
+   END                                      v
+                                     (routing == "done")
+                                            |
+                                            v
+                                           END
+```
+
+### ProjectState (TypedDict, orchestration/state.py)
+
+| Field | Type | Written by | Reducer |
+|---|---|---|---|
+| `user_requirement` | `str` | caller | none |
+| `tech_spec` | `str` | PM | none |
+| `tasks` | `list[CodingTask]` | PM | `operator.add` (append) |
+| `artifacts` | `list[CodingArtifact]` | Coder | `operator.add` (append) |
+| `current_task_index` | `int` | Coder | none |
+| `routing` | `str` | PM, Coder | none (overwrite each turn) |
+| `error` | `str` | PM | none |
+
+### PM Agent (agents/pm_agent.py)
+
+- `build_tech_spec(requirement)` — LLM call: requirement -> Markdown spec with five sections (Overview, Functional, Non-Functional, File Structure, Constraints).
+- `decompose_into_tasks(spec)` — LLM call: spec -> JSON task list (strips accidental markdown fences, fills defaults for missing fields, returns `[]` on parse failure).
+- `pm_node(state)` — runs both in sequence, sets `routing="coder"` on success or `"error"` if zero tasks were produced.
+
+### Coder Node (agents/coder_agent.py)
+
+- `coder_node(state)` — picks `tasks[current_task_index]`, instantiates the Week 1 `CoderAgent`, runs it on the formatted task instruction, appends a `CodingArtifact` to state, increments the task index, and sets `routing="coder"` (more tasks) or `"done"` (queue drained).
+
+### Routers (orchestration/graph.py)
+
+- `route_after_pm` — `"coder"` on success, `END` otherwise.
+- `route_after_coder` — `"coder"` to self-loop, `END` when all tasks done.
+
+---
+
 ## Week 1: Coder Agent v1.0
 
 Single autonomous agent that accepts a natural-language coding task and returns structured, validated output.
