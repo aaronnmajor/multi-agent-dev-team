@@ -1,6 +1,73 @@
 # Architecture — Multi-Agent Dev Team
 
-## Week 2: Multi-Agent System v2.0 (current)
+## Week 3: Complete Agent Team v3.0 (current)
+
+Three-agent system with an iterative review loop between Coder and QA, plus both MCP and A2A protocol layers.
+
+```
+  START
+    |
+    v
++-------+      routing == "coder"     +---------+     routing == "qa"      +------+
+|  pm   | -------------------------> |  coder  | -----------------------> |  qa  |
++-------+                             +---------+                          +------+
+    |                                      ^                                   |
+    | (routing == "error")                 |  routing == "coder"               |
+    v                                      |  (retry OR next task)             |
+   END                                     +-----------------------------------+
+                                                                               |
+                                                              routing == "done"
+                                                                               |
+                                                                               v
+                                                                              END
+```
+
+### QA review loop (Reflexion-style)
+
+1. Coder writes artifact to shared state and routes to QA.
+2. QA evaluates the artifact against a rubric (correctness, safety, style, execution result).
+3. On fail, if `retry_count < MAX_RETRIES_PER_TASK (2)`, QA routes back to Coder with structured feedback. Coder's next iteration includes the review's `issues` and `suggestions` in its instruction.
+4. On pass (or retries exhausted), QA advances `current_task_index` and routes back to Coder for the next task, or END if all tasks are complete.
+5. A best-effort artifact is preserved even when retries are exhausted — no code is discarded.
+
+### Updated `ProjectState` (W3 additions in bold)
+
+| Field | Type | Written by | Reducer |
+|---|---|---|---|
+| `user_requirement` | `str` | caller | none |
+| `tech_spec` | `str` | PM | none |
+| `tasks` | `list[CodingTask]` | PM | `operator.add` (append) |
+| `artifacts` | `list[CodingArtifact]` | Coder | `operator.add` (append) |
+| **`reviews`** | **`list[QAReview]`** | **QA** | **`operator.add` (append)** |
+| `current_task_index` | `int` | QA (on pass/exhaustion) | none |
+| **`retry_count`** | **`int`** | **QA** | **none** |
+| `routing` | `str` | all three | none |
+| `error` | `str` | PM | none |
+
+### QA Agent (agents/qa_agent.py)
+
+- `review_artifact(task, artifact)` — single LLM call returning a `QAReview` dict with `passed`, `issues`, `suggestions`, `summary`. Malformed JSON defaults to pass (to avoid blocking on transient parse failures, per the Reflexion stopping-condition guidance).
+- `qa_node(state)` — LangGraph node that runs the review, updates `reviews` and `retry_count`, advances or retains `current_task_index`, and sets `routing`.
+
+### MCP adapter (tools/mcp_adapter.py)
+
+- `TOOL_REGISTRY` maps tool names to their callable handlers.
+- `list_tools()` returns MCP-style descriptors (`name`, `description`, `input_schema`) by introspecting the LangChain `@tool` metadata.
+- `call_tool(name, arguments)` dispatches by name, returns the string result. Equivalent to MCP's `tools/call` method.
+- This is an in-process adapter rather than a full stdio subprocess server. It demonstrates the MCP contract at the interface level without the transport overhead. A full subprocess server can be added in Week 4 polish.
+
+### A2A protocol (orchestration/a2a.py)
+
+- `Message` dataclass enforces the five mandatory fields (`sender`, `receiver`, `intent`, `payload`, `correlation_id`) and validates sender/receiver/intent in `__post_init__`.
+- `Broker` maintains a separate `asyncio.Queue` per agent; senders enqueue by receiver name. Decoupled — no direct references between agents.
+- `AGENT_CAPABILITIES` advertises each agent's supported intents (sends/receives) — the in-process equivalent of A2A's agent card discovery.
+- `validate_incoming(message, receiver, allowed_senders)` is the trust-boundary check; returns False for unknown intents or unauthorised senders so the caller can log and discard rather than raise.
+
+In the Week 3 graph the protocol is demonstrated via these primitives; LangGraph shared state is still the primary channel between Coder and QA for simplicity. In Week 4 or 5 the review loop can be refactored to actually use the A2A broker if async peer communication is needed.
+
+---
+
+## Week 2: Multi-Agent System v2.0
 
 PM Agent hands off to Coder Agent via shared `ProjectState` on a LangGraph StateGraph.
 

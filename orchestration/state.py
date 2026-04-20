@@ -69,8 +69,18 @@ class CodingArtifact(TypedDict):
     exec_result: str       # stdout / error from running the artifact
 
 
+class QAReview(TypedDict):
+    """A review produced by the QA & Debugger agent for a single artifact."""
+
+    task_id: str
+    passed: bool
+    issues: list[str]         # Concrete bugs / style violations found
+    suggestions: list[str]    # Recommended fixes
+    summary: str              # One-line summary for the coder
+
+
 class ProjectState(TypedDict):
-    """Shared state for the PM + Coder multi-agent graph.
+    """Shared state for the PM + Coder + QA multi-agent graph.
 
     Fields written by multiple agents use `Annotated[list, add]` as a reducer
     so values accumulate rather than overwrite.
@@ -80,6 +90,8 @@ class ProjectState(TypedDict):
     tech_spec: str                                   # PM -> state
     tasks: Annotated[list[CodingTask], add]          # PM -> state (reducer: append)
     artifacts: Annotated[list[CodingArtifact], add]  # Coder -> state (reducer: append)
-    current_task_index: int                          # Coder loop counter
-    routing: str                                     # Flow control: "coder" | "done" | "error"
+    reviews: Annotated[list[QAReview], add]          # QA -> state (reducer: append) (W3)
+    current_task_index: int                          # Coder/QA loop counter
+    retry_count: int                                 # Per-task retry counter (W3)
+    routing: str                                     # Flow: "coder" | "qa" | "done" | "error"
     error: str                                       # Error message if any

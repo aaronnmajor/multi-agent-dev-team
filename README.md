@@ -5,14 +5,19 @@
 A LangGraph-based autonomous software development team. The system grows weekly:
 Week 1 is a single Coder Agent; by Week 5 it is a PM + Coder + QA team with shared state, feedback loops, and production hardening.
 
-## Current state (Week 2: Multi-Agent System v2.0)
+## Current state (Week 3: Complete Agent Team v3.0)
 
-A two-agent system built on LangGraph shared state:
+A three-agent system with an iterative review loop and both MCP and A2A protocol layers:
 
 - **PM Agent** — converts a raw user requirement into a Markdown tech spec and a JSON task list.
-- **Coder Agent** — picks tasks off the shared state one at a time, writes code, executes it, and stores the artifact back in state. Self-loops until all tasks are complete.
+- **Coder Agent** — picks tasks off the shared state one at a time, writes code, executes it, and stores the artifact back in state.
+- **QA & Debugger Agent** — reviews each artifact against a rubric (correctness, safety, style, execution). On fail, sends the coder back for up to 2 retries with structured feedback. On pass (or retry exhaustion), advances to the next task.
 
-The graph is `START → PM → (conditional) → Coder → (self-loop until done) → END`. All state lives in a typed `ProjectState` dict; the `tasks` and `artifacts` fields use `Annotated[list, add]` reducers so values accumulate across agent turns rather than overwrite.
+**Graph:** `START → PM → Coder → QA → (retry | next task | END)`
+
+**Protocol layers:**
+- **MCP adapter** (`tools/mcp_adapter.py`) — tool registry and dispatch that mirrors the MCP contract. Demonstrates agent-to-tool protocol at the interface level (full stdio subprocess server deferred to Week 4 polish).
+- **A2A module** (`orchestration/a2a.py`) — five-field `Message` dataclass, validating `Broker` with per-agent `asyncio.Queue`, capability advertisement, and trust-boundary intent validation. Demonstrates agent-to-agent protocol for Coder ↔ QA peer messaging.
 
 ### Week 1 still available
 
@@ -81,18 +86,22 @@ docker compose up --build
 ```
 multi-agent-dev-team/
 ├── agents/                  # One module per agent
-│   ├── coder_agent.py       # CoderAgent class (W1) + coder_node (W2)
-│   └── pm_agent.py          # PM agent: requirement -> spec -> tasks (W2)
+│   ├── coder_agent.py       # CoderAgent class (W1) + coder_node (W2/W3)
+│   ├── pm_agent.py          # PM agent: requirement -> spec -> tasks (W2)
+│   └── qa_agent.py          # QA & Debugger: rubric review + feedback (W3)
 ├── tools/                   # Shared tool definitions
 │   ├── file_io.py           # read_file, write_file
-│   └── code_executor.py     # exec_python (subprocess sandbox)
+│   ├── code_executor.py     # exec_python (subprocess sandbox)
+│   └── mcp_adapter.py       # MCP tool registry + dispatch (W3)
 ├── memory.py                # SlidingWindowBuffer + Chroma SemanticMemory
-├── orchestration/           # LangGraph graph + state schemas
+├── orchestration/           # LangGraph graph + state schemas + protocols
 │   ├── graph.py             # Multi-agent graph + entry point
-│   └── state.py             # ProjectState TypedDict, Pydantic AgentOutput
+│   ├── state.py             # ProjectState, AgentOutput, CodingTask/Artifact, QAReview
+│   └── a2a.py               # A2A Message, Broker, capability advertisement (W3)
 ├── tests/                   # Smoke + unit tests
 │   ├── test_smoke.py        # W1 end-to-end (LLM)
-│   └── test_multi_agent.py  # W2 PM + routers + graph (mocked)
+│   ├── test_multi_agent.py  # W2 PM + routers + graph (mocked)
+│   └── test_week3.py        # W3 QA + A2A + MCP adapter + graph routing (mocked)
 ├── docs/
 │   └── architecture.md
 ├── .env.example

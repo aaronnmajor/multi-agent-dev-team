@@ -166,9 +166,12 @@ class TestRouteAfterPm:
 
 
 class TestRouteAfterCoder:
-    def test_coder_routing_loops_back(self):
-        state = {"routing": "coder"}
-        assert route_after_coder(state) == "coder"  # type: ignore[arg-type]
+    """In the Week 3 graph, after the coder produces an artifact we route to QA,
+    not back to the coder. The QA node is what decides whether to loop or advance."""
+
+    def test_qa_routing_goes_to_qa(self):
+        state = {"routing": "qa"}
+        assert route_after_coder(state) == "qa"  # type: ignore[arg-type]
 
     def test_done_routing_goes_to_end(self):
         from langgraph.graph import END

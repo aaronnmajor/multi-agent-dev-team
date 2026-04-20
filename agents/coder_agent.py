@@ -189,12 +189,28 @@ def _task_instruction(task: dict, spec: str) -> str:
     )
 
 
+def _format_feedback_from_latest_review(state: ProjectState, task_id: str) -> str:
+    """Find the most recent QA review for this task and format it as feedback for the coder."""
+    reviews = state.get("reviews", [])
+    last = next((r for r in reversed(reviews) if r.get("task_id") == task_id), None)
+    if last is None:
+        return ""
+    parts = [f"Previous QA review flagged issues (retry {state.get('retry_count', 0)} of 2):"]
+    for issue in last.get("issues", []):
+        parts.append(f"  - ISSUE: {issue}")
+    for suggestion in last.get("suggestions", []):
+        parts.append(f"  - SUGGESTION: {suggestion}")
+    if last.get("summary"):
+        parts.append(f"  Summary: {last['summary']}")
+    return "\n".join(parts)
+
+
 def coder_node(state: ProjectState) -> dict[str, Any]:
-    """LangGraph node: process one task from the shared state.
+    """LangGraph node: process the current task and route to QA for review.
 
     Reads `tasks[current_task_index]`, runs the single-agent graph on it,
-    writes the resulting artifact back, increments the task index, and sets
-    routing to "coder" if more tasks remain or "done" if the queue is drained.
+    writes the resulting artifact back, and routes to "qa". Task index is
+    advanced by the QA node on pass (or on retry exhaustion), not here.
     """
     tasks = state.get("tasks", [])
     idx = state.get("current_task_index", 0)
@@ -204,9 +220,15 @@ def coder_node(state: ProjectState) -> dict[str, Any]:
 
     task = tasks[idx]
     spec = state.get("tech_spec", "")
+    instruction = _task_instruction(task, spec)
+
+    # If this is a retry, append the previous QA feedback so the coder can fix the issues.
+    feedback = _format_feedback_from_latest_review(state, task["task_id"])
+    if feedback:
+        instruction = f"{instruction}\n\n---\n{feedback}"
 
     agent = CoderAgent()
-    output = agent.run(_task_instruction(task, spec))
+    output = agent.run(instruction)
 
     artifact: CodingArtifact = {
         "task_id":     task["task_id"],
@@ -215,13 +237,9 @@ def coder_node(state: ProjectState) -> dict[str, Any]:
         "exec_result": output.result,
     }
 
-    next_idx = idx + 1
-    done = next_idx >= len(tasks)
-
     return {
         "artifacts": [artifact],
-        "current_task_index": next_idx,
-        "routing": "done" if done else "coder",
+        "routing":   "qa",
     }
 
 
