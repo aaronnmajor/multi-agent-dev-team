@@ -18,13 +18,16 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
+from config import get_model
 from memory import SemanticMemory, SlidingWindowBuffer
+from observability import get_logger, trace_span
 from orchestration.state import AgentOutput, CodingArtifact, ProjectState
 from tools import exec_python, read_file, write_file
 
 load_dotenv(override=True)
 
-MODEL = "gpt-4.1-mini"
+MODEL = get_model("coder")
+_log = get_logger("coder")
 MAX_ITERATIONS = 10
 MAX_REACT_ITERATIONS = 8  # Week 2: per-task cap to prevent loops
 
@@ -227,8 +230,10 @@ def coder_node(state: ProjectState) -> dict[str, Any]:
     if feedback:
         instruction = f"{instruction}\n\n---\n{feedback}"
 
-    agent = CoderAgent()
-    output = agent.run(instruction)
+    run_id = state.get("run_id", "")
+    with trace_span("coder", "coder_task", run_id, task_id=task["task_id"]):
+        agent = CoderAgent()
+        output = agent.run(instruction)
 
     artifact: CodingArtifact = {
         "task_id":     task["task_id"],
@@ -237,6 +242,13 @@ def coder_node(state: ProjectState) -> dict[str, Any]:
         "exec_result": output.result,
     }
 
+    _log.info(
+        "coder_task_complete",
+        run_id=run_id,
+        task_id=task["task_id"],
+        code_chars=len(output.code),
+        iterations=output.iterations_used,
+    )
     return {
         "artifacts": [artifact],
         "routing":   "qa",

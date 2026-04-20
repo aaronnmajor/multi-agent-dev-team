@@ -95,3 +95,4 @@ class ProjectState(TypedDict):
     retry_count: int                                 # Per-task retry counter (W3)
     routing: str                                     # Flow: "coder" | "qa" | "done" | "error"
     error: str                                       # Error message if any
+    run_id: str                                      # Distributed-trace root id (W4)

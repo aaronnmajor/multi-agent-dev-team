@@ -16,6 +16,7 @@ from langgraph.graph import END, START, StateGraph
 from agents.coder_agent import CoderAgent, build_coder_graph, coder_node
 from agents.pm_agent import pm_node
 from agents.qa_agent import qa_node
+from observability import get_logger, new_run_id, trace_span
 from orchestration.state import ProjectState
 
 __all__ = ["CoderAgent", "build_coder_graph", "build_graph", "create_graph"]
@@ -85,6 +86,10 @@ if __name__ == "__main__":
 
     requirement = sys.argv[1] if len(sys.argv) > 1 else DEMO_REQUIREMENT
 
+    run_id = new_run_id()
+    log = get_logger("pipeline").bind(run_id=run_id)
+    log.info("pipeline_start", requirement=requirement[:200])
+
     graph = create_graph()
     initial_state: ProjectState = {
         "user_requirement":   requirement,
@@ -96,9 +101,18 @@ if __name__ == "__main__":
         "retry_count":        0,
         "routing":            "",
         "error":              "",
+        "run_id":             run_id,
     }
 
-    final = graph.invoke(initial_state, {"recursion_limit": 100})
+    with trace_span("pipeline", "pipeline_run", run_id):
+        final = graph.invoke(initial_state, {"recursion_limit": 100})
+
+    log.info(
+        "pipeline_end",
+        tasks=len(final.get("tasks", [])),
+        artifacts=len(final.get("artifacts", [])),
+        reviews=len(final.get("reviews", [])),
+    )
 
     print("=" * 60)
     print("TECH SPEC")

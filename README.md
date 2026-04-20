@@ -5,7 +5,23 @@
 A LangGraph-based autonomous software development team. The system grows weekly:
 Week 1 is a single Coder Agent; by Week 5 it is a PM + Coder + QA team with shared state, feedback loops, and production hardening.
 
-## Current state (Week 3: Complete Agent Team v3.0)
+## Current state (Week 4: Production-Ready System v4.0)
+
+Week 3's three-agent team hardened for production:
+
+- **Observability** — JSON-structured logs via stdlib `logging` with per-agent loggers; `run_id` propagated through `ProjectState` so every log event in a pipeline invocation links back to the same trace; `trace_span` context manager emits `span_start` / `span_end` / `span_error` events with duration.
+- **Error handling** — structured exception hierarchy (`TransientError`, `PermanentError`, `DegradableError`), `retry_with_backoff` decorator with full jitter, `CircuitBreaker` with CLOSED/OPEN/HALF-OPEN state machine, and pipeline-level `with_timeout` watchdog.
+- **Cost optimisation** — `TokenUsage` dataclass + `CostTracker` aggregator with per-model pricing; tiered `AGENT_MODELS` config so the model for each agent can be tuned independently; simple `ResponseCache` keyed by SHA-256 hash of the full prompt (TTL-based).
+- **Test suite** — 79 deterministic non-LLM tests plus one LLM-gated end-to-end smoke test; covers unit (format, token math, routers), integration (graph assembly), and resilience (retry/breaker state transitions).
+- **Docker deployment** — Dockerfile runs as a non-root `agent` user, includes a healthcheck that imports the graph module, docker-compose mounts `workspace/` and `logs/` volumes.
+
+### Week 3 still in place
+
+The three-agent team (PM, Coder, QA) with iterative review loop, MCP adapter, and A2A protocol primitives is unchanged. Week 4 layers production concerns around it without altering the core orchestration.
+
+---
+
+## Previous milestone (Week 3: Complete Agent Team v3.0)
 
 A three-agent system with an iterative review loop and both MCP and A2A protocol layers:
 
@@ -85,27 +101,40 @@ docker compose up --build
 
 ```
 multi-agent-dev-team/
-├── agents/                  # One module per agent
-│   ├── coder_agent.py       # CoderAgent class (W1) + coder_node (W2/W3)
-│   ├── pm_agent.py          # PM agent: requirement -> spec -> tasks (W2)
-│   └── qa_agent.py          # QA & Debugger: rubric review + feedback (W3)
-├── tools/                   # Shared tool definitions
-│   ├── file_io.py           # read_file, write_file
-│   ├── code_executor.py     # exec_python (subprocess sandbox)
-│   └── mcp_adapter.py       # MCP tool registry + dispatch (W3)
-├── memory.py                # SlidingWindowBuffer + Chroma SemanticMemory
-├── orchestration/           # LangGraph graph + state schemas + protocols
-│   ├── graph.py             # Multi-agent graph + entry point
-│   ├── state.py             # ProjectState, AgentOutput, CodingTask/Artifact, QAReview
-│   └── a2a.py               # A2A Message, Broker, capability advertisement (W3)
-├── tests/                   # Smoke + unit tests
-│   ├── test_smoke.py        # W1 end-to-end (LLM)
-│   ├── test_multi_agent.py  # W2 PM + routers + graph (mocked)
-│   └── test_week3.py        # W3 QA + A2A + MCP adapter + graph routing (mocked)
+├── agents/                   # One module per agent
+│   ├── coder_agent.py        # CoderAgent class (W1) + coder_node (W2/W3)
+│   ├── pm_agent.py           # PM agent: requirement -> spec -> tasks (W2)
+│   └── qa_agent.py           # QA & Debugger: rubric review + feedback (W3)
+├── tools/                    # Shared tool definitions
+│   ├── file_io.py
+│   ├── code_executor.py      # exec_python (subprocess sandbox)
+│   └── mcp_adapter.py        # MCP tool registry + dispatch (W3)
+├── orchestration/
+│   ├── graph.py              # Multi-agent graph + entry point
+│   ├── state.py              # ProjectState, AgentOutput, etc.
+│   └── a2a.py                # A2A Message, Broker, capability advertisement (W3)
+├── observability/            # W4
+│   ├── logging.py            # JSON formatter + per-agent loggers
+│   ├── tracing.py            # run_id generation + trace_span context manager
+│   └── cost.py               # TokenUsage + CostTracker + MODEL_PRICES
+├── resilience/               # W4
+│   ├── retry.py              # retry_with_backoff decorator
+│   ├── circuit_breaker.py    # CLOSED/OPEN/HALF-OPEN state machine
+│   └── timeout.py            # with_timeout watchdog
+├── caching/                  # W4
+│   └── response_cache.py     # SHA-256-keyed TTL cache
+├── memory.py                 # Sliding window + Chroma
+├── exceptions.py             # AgentError / TransientError / PermanentError / DegradableError (W4)
+├── config.py                 # Per-agent model selection (W4)
+├── tests/
+│   ├── test_smoke.py         # W1 end-to-end (LLM)
+│   ├── test_multi_agent.py   # W2 PM + routers (mocked)
+│   ├── test_week3.py         # W3 QA + A2A + MCP adapter (mocked)
+│   └── test_week4.py         # W4 observability + resilience + cost + cache (mocked)
 ├── docs/
 │   └── architecture.md
 ├── .env.example
-├── Dockerfile
+├── Dockerfile                # Non-root user, healthcheck
 ├── docker-compose.yml
 ├── requirements.txt
 └── README.md

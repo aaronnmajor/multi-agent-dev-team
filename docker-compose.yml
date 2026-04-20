@@ -4,4 +4,6 @@ services:
     env_file: .env
     volumes:
       - ./workspace:/app/workspace
+      - ./logs:/app/logs
     command: python -m orchestration.graph
+    restart: "no"

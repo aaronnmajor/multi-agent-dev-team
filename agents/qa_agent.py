@@ -20,12 +20,16 @@ from typing import Any
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from config import get_model
+from observability import get_logger, trace_span
 from orchestration.state import ProjectState, QAReview
 
 load_dotenv(override=True)
 
-MODEL = "gpt-4.1-mini"
+MODEL = get_model("qa")
 MAX_RETRIES_PER_TASK = 2  # Coder gets up to 2 retries per task before QA approves as-is.
+
+_log = get_logger("qa")
 
 
 def _client() -> OpenAI:
@@ -131,7 +135,16 @@ def qa_node(state: ProjectState) -> dict[str, Any]:
     if task is None:
         return {"routing": "done"}
 
-    review = review_artifact(task, latest)
+    run_id = state.get("run_id", "")
+    with trace_span("qa", "qa_review", run_id, task_id=task_id):
+        review = review_artifact(task, latest)
+    _log.info(
+        "qa_review_complete",
+        run_id=run_id,
+        task_id=task_id,
+        passed=review["passed"],
+        issues=len(review.get("issues", [])),
+    )
 
     if not review["passed"] and retry_count < MAX_RETRIES_PER_TASK:
         # Fail and retry: keep the same task; the coder will redo it using the review feedback.

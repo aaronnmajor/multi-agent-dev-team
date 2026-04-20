@@ -17,11 +17,14 @@ from typing import Any
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from config import get_model
+from observability import get_logger, trace_span
 from orchestration.state import CodingTask, ProjectState
 
 load_dotenv(override=True)
 
-MODEL = "gpt-4.1-mini"
+MODEL = get_model("pm")
+_log = get_logger("pm")
 
 
 def _client() -> OpenAI:
@@ -124,26 +127,30 @@ def decompose_into_tasks(tech_spec: str, client: OpenAI | None = None) -> list[C
 
 
 def pm_node(state: ProjectState) -> dict[str, Any]:
-    """LangGraph node: run the PM agent on the current state.
-
-    Reads `user_requirement`, writes `tech_spec` + `tasks` + `routing`.
-    Sets routing to "coder" on success, "error" if task decomposition failed.
-    """
+    """LangGraph node: run the PM agent on the current state."""
     requirement = state.get("user_requirement", "").strip()
+    run_id = state.get("run_id", "")
+
     if not requirement:
+        _log.error("pm_missing_requirement", run_id=run_id)
         return {"routing": "error", "error": "Missing user_requirement in state"}
 
-    client = _client()
-    spec = build_tech_spec(requirement, client=client)
-    tasks = decompose_into_tasks(spec, client=client)
+    with trace_span("pm", "pm_node", run_id):
+        client = _client()
+        with trace_span("pm", "build_tech_spec", run_id):
+            spec = build_tech_spec(requirement, client=client)
+        with trace_span("pm", "decompose_into_tasks", run_id):
+            tasks = decompose_into_tasks(spec, client=client)
 
     if not tasks:
+        _log.error("pm_zero_tasks", run_id=run_id)
         return {
             "tech_spec": spec,
             "routing": "error",
             "error": "PM agent produced zero coding tasks from the spec",
         }
 
+    _log.info("pm_complete", run_id=run_id, task_count=len(tasks))
     return {
         "tech_spec": spec,
         "tasks": tasks,
