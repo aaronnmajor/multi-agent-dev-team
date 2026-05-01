@@ -21,13 +21,13 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from config import get_model
-from observability import get_logger, record_usage_from_response, trace_span
+from observability import get_logger, record_usage_from_response, trace_span, traceable
 from orchestration.state import ProjectState, QAReview
 
 load_dotenv(override=True)
 
 MODEL = get_model("qa")
-MAX_RETRIES_PER_TASK = 2  # Coder gets up to 2 retries per task before QA approves as-is.
+MAX_RETRIES_PER_TASK = 3  # Coder gets up to 3 retries per task before QA approves as-is.
 
 _log = get_logger("qa")
 
@@ -124,6 +124,7 @@ def review_artifact(
     return _parse_review_payload(raw, task.get("task_id", ""))
 
 
+@traceable(name="qa_node", run_type="chain")
 def qa_node(state: ProjectState) -> dict[str, Any]:
     """LangGraph node: review the most recent artifact and route accordingly.
 

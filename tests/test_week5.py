@@ -222,3 +222,81 @@ class TestSelfReflect:
         out = self_reflect("task", "print(1)", "1", client=client)
         assert out["needs_revision"] is False
         assert out["revised_code"] is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Workspace verification (post-pipeline pytest run)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestVerifyWorkspace:
+    def test_no_tests_status_when_workspace_empty(self, tmp_path: Path):
+        from orchestration.verify import verify_workspace
+        result = verify_workspace(tmp_path)
+        assert result["status"] == "no_tests"
+        assert result["passed"] == 0
+        assert result["failed"] == 0
+
+    def test_pass_status_when_all_tests_pass(self, tmp_path: Path):
+        from orchestration.verify import verify_workspace
+        (tmp_path / "test_passes.py").write_text(
+            "def test_one():\n    assert 1 + 1 == 2\n",
+            encoding="utf-8",
+        )
+        result = verify_workspace(tmp_path)
+        assert result["status"] == "pass"
+        assert result["passed"] == 1
+        assert result["failed"] == 0
+
+    def test_fail_status_when_any_test_fails(self, tmp_path: Path):
+        from orchestration.verify import verify_workspace
+        (tmp_path / "test_fails.py").write_text(
+            "def test_bad():\n    assert False\n",
+            encoding="utf-8",
+        )
+        result = verify_workspace(tmp_path)
+        assert result["status"] == "fail"
+        assert result["failed"] == 1
+
+    def test_format_verification_renders_status(self):
+        from orchestration.verify import format_verification
+        line = format_verification({
+            "status": "pass", "passed": 3, "failed": 0, "errors": 0, "skipped": 0,
+        })
+        assert "PASS" in line
+        assert "passed=3" in line
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LangSmith tracing wiring
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestLangSmithWiring:
+    def test_configure_langsmith_returns_false_without_key(self, monkeypatch):
+        from observability.tracing import configure_langsmith
+        for var in (
+            "LANGCHAIN_API_KEY",
+            "LANGSMITH_API_KEY",
+            "LANGCHAIN_TRACING_V2",
+            "LANGCHAIN_PROJECT",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        assert configure_langsmith() is False
+
+    def test_configure_langsmith_promotes_langsmith_aliases(self, monkeypatch):
+        from observability.tracing import configure_langsmith
+        monkeypatch.delenv("LANGCHAIN_API_KEY", raising=False)
+        monkeypatch.setenv("LANGSMITH_API_KEY", "ls__test")
+        monkeypatch.setenv("LANGSMITH_PROJECT", "demo")
+        assert configure_langsmith() is True
+        import os
+        assert os.environ["LANGCHAIN_API_KEY"] == "ls__test"
+        assert os.environ["LANGCHAIN_PROJECT"] == "demo"
+
+    def test_traceable_decorator_is_callable_when_langsmith_absent(self):
+        from observability.tracing import traceable
+
+        @traceable(name="x")
+        def f(state: dict) -> dict:
+            return {"ok": True}
+
+        assert f({}) == {"ok": True}

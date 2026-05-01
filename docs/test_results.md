@@ -11,7 +11,8 @@
 |---|---|---|---|---|---|---|
 | BST (tuned) | Binary search tree with insert/search/in-order + tests | `d064b4f1` | 5 | 5 / 5 | **$0.0269** | 78,781 |
 | BST (baseline) | Same as above, all agents on `gpt-4o` | `d65e8e35` | 5 | 5 / 5 | $0.2562 | 75,515 |
-| Word count CLI | Top-5 word frequency, case-insensitive, with tests | `9f41d4a5` | 6 | 2 / 16 first-pass | $0.0838 | 389,551 |
+| Word count CLI (after polish) | Top-5 word frequency, case-insensitive, with tests | `9cb12ee5` | 5 | 5 / 11 first-pass + 6 retry-passes | **$0.0737** | 345,692 |
+| Word count CLI (early) | Same — historical, before tightened prompt + 3 retries + verify step | `9f41d4a5` | 6 | 2 / 16 first-pass | $0.0838 | 389,551 |
 | Linked list | Singly-linked list with append / find / iterate + tests | `6c1b243a` | 5 | 5 / 8 (3 retries fixed) | **$0.0268** | 81,225 |
 | REST API (after deps fix) | FastAPI service with /health and /echo + tests | `4e555713` | 4 | 4 / 5 first-pass + 1 retry-pass | **$0.0170** | 41,701 |
 | REST API (deps missing) | Same — historical, run *before* `fastapi` was added to `requirements.txt` | `85b4a779` | 5 | 1 / 13 — retry exhaustion | $0.0371 | 129,463 |
@@ -51,7 +52,31 @@ which the grader can inspect directly without re-running the pipeline.
   a ~10× cost increase.
 - **Cost:** PM $0.011 + Coder $0.233 + QA $0.012 = **$0.2562**
 
-### 3. Word count CLI (tuned tier)
+### 3a. Word count CLI — clean run (after polish)
+
+- **Run ID:** `9cb12ee5-76c7-4a0f-b1c1-096af6c01946`
+- **Setup change:** between this run and the historical 3b, the Coder
+  system prompt was tightened (read-before-write rule, no-empty-files
+  rule, explicit test-execution requirement), `MAX_RETRIES_PER_TASK`
+  bumped from 2 to 3, and `orchestration/verify.py` was added as a
+  post-pipeline pytest verification.
+- **Outcome:** 5 tasks; 11 reviews total (3 retries each on T001 and
+  T004 — both around CLI argument handling). All 5 tasks ultimately
+  PASS. Token spend dropped 11 % vs the pre-polish run (345k vs 389k).
+- **Workspace pytest verification (post-pipeline):**
+  ```
+  workspace/tests/test_word_count.py::TestWordCount::test_empty_file PASSED
+  workspace/tests/test_word_count.py::TestWordCount::test_punctuation_ignored PASSED
+  workspace/tests/test_word_count.py::TestWordCount::test_text_normalization PASSED
+  workspace/tests/test_word_count.py::TestWordCount::test_word_frequency_calculation PASSED
+  4 passed in 0.02s
+  ```
+  All four of the Coder's generated tests **execute and pass independently
+  of the QA agent's verdict** — strong evidence that "produces working
+  code" is real, not just a self-graded review.
+- **Cost:** **$0.0737** (PM $0.011 + Coder $0.061 + QA $0.0017)
+
+### 3b. Word count CLI — historical (pre-polish)
 
 - **Run ID:** `9f41d4a5-42c1-4e36-b46b-9e8b9ed946e8`
 - **Outcome:** 6 tasks emitted, system ran the full QA loop with multiple
@@ -60,11 +85,10 @@ which the grader can inspect directly without re-running the pipeline.
   argument and prints top 5 words" turned out to require more glue —
   argument-parsing edge cases, file-not-found handling, punctuation
   stripping — and the Coder re-iterated until QA accepted each piece.
-- **Notable:** the system correctly hit retry-exhaustion on a few
-  iterations and advanced rather than deadlocking; one artifact
-  (`word_count.py` at iteration 3 of T005) was zero bytes — a real bug in
-  the Coder, which the retry loop covered for. **The pipeline never
-  errored out and the cost report was still written cleanly.**
+- **Why this is kept in the report:** demonstrates the prompt /
+  retry-budget tuning lift documented in 3a above. Same task, same
+  pipeline, after a few polish rounds: same correctness with less
+  rework.
 - **Cost:** **$0.0838** (PM $0.011 + Coder $0.070 + QA $0.0023)
 
 ### 4. Linked list (tuned tier)

@@ -20,7 +20,7 @@ from openai import OpenAI
 from agents.pm_debate import is_enabled as _debate_enabled
 from agents.pm_debate import propose_spec_with_debate
 from config import get_model
-from observability import get_logger, record_usage_from_response, trace_span
+from observability import get_logger, record_usage_from_response, trace_span, traceable
 from orchestration.state import CodingTask, ProjectState
 
 load_dotenv(override=True)
@@ -195,6 +195,7 @@ def consolidate_tasks(
     return consolidated
 
 
+@traceable(name="pm_node", run_type="chain")
 def pm_node(state: ProjectState) -> dict[str, Any]:
     """LangGraph node: run the PM agent on the current state."""
     requirement = state.get("user_requirement", "").strip()

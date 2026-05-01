@@ -16,8 +16,15 @@ from langgraph.graph import END, START, StateGraph
 from agents.coder_agent import CoderAgent, build_coder_graph, coder_node
 from agents.pm_agent import pm_node
 from agents.qa_agent import qa_node
-from observability import get_logger, new_run_id, trace_span, write_report
+from observability import (
+    configure_langsmith,
+    get_logger,
+    new_run_id,
+    trace_span,
+    write_report,
+)
 from orchestration.state import ProjectState
+from orchestration.verify import format_verification, verify_workspace
 
 # Cost reports for every pipeline run land here. The directory is created
 # on first write so the repo stays clean when no runs have happened yet.
@@ -98,7 +105,8 @@ if __name__ == "__main__":
 
     run_id = new_run_id()
     log = get_logger("pipeline").bind(run_id=run_id)
-    log.info("pipeline_start", requirement=requirement[:200])
+    langsmith_active = configure_langsmith()
+    log.info("pipeline_start", requirement=requirement[:200], langsmith=langsmith_active)
 
     graph = create_graph()
     initial_state: ProjectState = {
@@ -160,3 +168,17 @@ if __name__ == "__main__":
     if final.get("error"):
         print()
         print(f"ERROR: {final['error']}")
+
+    # Independent verification: run pytest against any tests the agent wrote.
+    # Adds a stronger correctness signal than QA-by-LLM-judgement alone.
+    print()
+    print("=" * 60)
+    verification = verify_workspace()
+    print(format_verification(verification))
+    log.info(
+        "workspace_verification",
+        status=verification["status"],
+        passed=verification["passed"],
+        failed=verification["failed"],
+    )
+    print("=" * 60)

@@ -41,6 +41,9 @@ Week 5 polish on top of Week 4:
 - **Cost report auto-write** — every pipeline run drops a JSON report at `docs/cost_reports/<run_id>.json` with per-agent token + USD totals.
 - **Task-list cap** — PM agent runs a consolidation pass when initial decomposition exceeds 8 tasks, preventing overgrown task fan-out.
 - **Persistent Chroma** — `docker compose up` starts a Chroma service with healthcheck and the agent waits for it via `depends_on: condition: service_healthy`. Outside Docker the in-process client is still used so tests stay fast.
+- **Independent workspace verification** — after the pipeline finishes, `orchestration/verify.py` runs `pytest` against the agent-generated artifacts and reports pass/fail counts. Turns "QA agent says it works" into "pytest confirms it works."
+- **LangSmith tracing** — every node is decorated with `@traceable`; set `LANGSMITH_API_KEY` (or `LANGCHAIN_API_KEY`) and the run shows up as a single trace tree in the LangSmith dashboard. Falls back to local JSON spans when the SDK or key is absent.
+- **Tighter Coder prompt + 3 retries** — explicit guidance against empty files, mandatory `read_file` before overwriting, and `MAX_RETRIES_PER_TASK = 3` give the QA-then-Coder loop more headroom to converge.
 
 ## Previous milestone (Week 4: Production-Ready System v4.0)
 

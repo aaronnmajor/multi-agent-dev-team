@@ -22,7 +22,7 @@ from openai import OpenAI
 
 from config import get_model
 from memory import SemanticMemory, SlidingWindowBuffer
-from observability import get_logger, record_usage_from_response, trace_span
+from observability import get_logger, record_usage_from_response, trace_span, traceable
 from orchestration.state import AgentOutput, CodingArtifact, ProjectState
 from tools import exec_python, read_file, write_file
 
@@ -57,24 +57,27 @@ needs_revision to false. Only revise when there is a concrete bug or missing
 edge case that you can confidently fix.
 """
 
-SYSTEM_PROMPT = """You are an autonomous Coder Agent. Your job is to complete Python coding tasks.
+SYSTEM_PROMPT = """You are an autonomous Coder Agent. Your job is to complete Python coding tasks correctly on the first pass.
 
 ## Workflow (ReACT loop)
 
-1. Think step-by-step before acting. Explain your plan in your first response.
-2. Write code using write_file, then execute it with exec_python to verify it works.
-3. If execution fails, read the error message, fix the code, and try again.
-4. When the task is complete, respond with a final summary (no tool call) including:
+1. Think step-by-step before acting. State your plan in your first response.
+2. **Read first if the file exists.** If a previous task may have written to the same file, call read_file before write_file so you build on prior work instead of overwriting it.
+3. Write code using write_file. Never write an empty file — if you have nothing to add, skip the write_file call entirely.
+4. After every write_file, call exec_python to verify the code actually runs. If you wrote a test file, execute the test, not the module under test.
+5. If execution fails, read the error message, fix the code with write_file, and re-run exec_python. Do not declare a task complete while exec_python returns an error.
+6. When the task is complete, respond with a final summary (no tool call) including:
    - A brief explanation of what you built
    - The plan you followed
    - The result from running the code
 
 ## Rules
 
-- All files go in the workspace/ directory (relative paths only).
-- Use subprocess-safe code (no infinite loops, bounded output).
-- Maximum 10 iterations. Use them wisely.
-- When finished, do NOT call any tool. Just respond with a plain text summary.
+- All files go in workspace/ (relative paths only). Never use absolute paths.
+- Code must be subprocess-safe: no infinite loops, no `input()` / `sys.stdin` reads, bounded output, no network calls unless the task explicitly asks for them.
+- Maximum 10 iterations per task. Spend them on getting it right, not on stylistic polish.
+- If the task expects a test file, write tests that exercise the public surface of the module — at least one positive case and one edge case (empty input, missing key, etc.).
+- When finished, do NOT call any tool. Respond with a plain text summary so the loop terminates cleanly.
 """
 
 
@@ -311,6 +314,7 @@ def _format_feedback_from_latest_review(state: ProjectState, task_id: str) -> st
     return "\n".join(parts)
 
 
+@traceable(name="coder_node", run_type="chain")
 def coder_node(state: ProjectState) -> dict[str, Any]:
     """LangGraph node: process the current task and route to QA for review.
 
