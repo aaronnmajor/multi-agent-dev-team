@@ -1,173 +1,244 @@
 # Architecture — Multi-Agent Dev Team
 
-## Week 3: Complete Agent Team v3.0 (current)
+> Capstone for *Build Autonomous Multi-Agent Systems* (Saras AI Institute,
+> Spring 2026). This document is the canonical architectural reference for
+> the project. The README's "Previous milestone" sections preserve the
+> chronological week-by-week narrative.
 
-Three-agent system with an iterative review loop between Coder and QA, plus both MCP and A2A protocol layers.
+## Contents
 
-```
-  START
-    |
-    v
-+-------+      routing == "coder"     +---------+     routing == "qa"      +------+
-|  pm   | -------------------------> |  coder  | -----------------------> |  qa  |
-+-------+                             +---------+                          +------+
-    |                                      ^                                   |
-    | (routing == "error")                 |  routing == "coder"               |
-    v                                      |  (retry OR next task)             |
-   END                                     +-----------------------------------+
-                                                                               |
-                                                              routing == "done"
-                                                                               |
-                                                                               v
-                                                                              END
-```
-
-### QA review loop (Reflexion-style)
-
-1. Coder writes artifact to shared state and routes to QA.
-2. QA evaluates the artifact against a rubric (correctness, safety, style, execution result).
-3. On fail, if `retry_count < MAX_RETRIES_PER_TASK (2)`, QA routes back to Coder with structured feedback. Coder's next iteration includes the review's `issues` and `suggestions` in its instruction.
-4. On pass (or retries exhausted), QA advances `current_task_index` and routes back to Coder for the next task, or END if all tasks are complete.
-5. A best-effort artifact is preserved even when retries are exhausted — no code is discarded.
-
-### Updated `ProjectState` (W3 additions in bold)
-
-| Field | Type | Written by | Reducer |
-|---|---|---|---|
-| `user_requirement` | `str` | caller | none |
-| `tech_spec` | `str` | PM | none |
-| `tasks` | `list[CodingTask]` | PM | `operator.add` (append) |
-| `artifacts` | `list[CodingArtifact]` | Coder | `operator.add` (append) |
-| **`reviews`** | **`list[QAReview]`** | **QA** | **`operator.add` (append)** |
-| `current_task_index` | `int` | QA (on pass/exhaustion) | none |
-| **`retry_count`** | **`int`** | **QA** | **none** |
-| `routing` | `str` | all three | none |
-| `error` | `str` | PM | none |
-
-### QA Agent (agents/qa_agent.py)
-
-- `review_artifact(task, artifact)` — single LLM call returning a `QAReview` dict with `passed`, `issues`, `suggestions`, `summary`. Malformed JSON defaults to pass (to avoid blocking on transient parse failures, per the Reflexion stopping-condition guidance).
-- `qa_node(state)` — LangGraph node that runs the review, updates `reviews` and `retry_count`, advances or retains `current_task_index`, and sets `routing`.
-
-### MCP adapter (tools/mcp_adapter.py)
-
-- `TOOL_REGISTRY` maps tool names to their callable handlers.
-- `list_tools()` returns MCP-style descriptors (`name`, `description`, `input_schema`) by introspecting the LangChain `@tool` metadata.
-- `call_tool(name, arguments)` dispatches by name, returns the string result. Equivalent to MCP's `tools/call` method.
-- This is an in-process adapter rather than a full stdio subprocess server. It demonstrates the MCP contract at the interface level without the transport overhead. A full subprocess server can be added in Week 4 polish.
-
-### A2A protocol (orchestration/a2a.py)
-
-- `Message` dataclass enforces the five mandatory fields (`sender`, `receiver`, `intent`, `payload`, `correlation_id`) and validates sender/receiver/intent in `__post_init__`.
-- `Broker` maintains a separate `asyncio.Queue` per agent; senders enqueue by receiver name. Decoupled — no direct references between agents.
-- `AGENT_CAPABILITIES` advertises each agent's supported intents (sends/receives) — the in-process equivalent of A2A's agent card discovery.
-- `validate_incoming(message, receiver, allowed_senders)` is the trust-boundary check; returns False for unknown intents or unauthorised senders so the caller can log and discard rather than raise.
-
-In the Week 3 graph the protocol is demonstrated via these primitives; LangGraph shared state is still the primary channel between Coder and QA for simplicity. In Week 4 or 5 the review loop can be refactored to actually use the A2A broker if async peer communication is needed.
+1. [System overview](#system-overview)
+2. [Pipeline diagram](#pipeline-diagram)
+3. [Agent roles](#agent-roles)
+4. [Shared state (`ProjectState`)](#shared-state-projectstate)
+5. [Cross-cutting concerns](#cross-cutting-concerns)
+6. [Innovations](#innovations)
+7. [Framework justification](#framework-justification)
+8. [Operational topology](#operational-topology)
 
 ---
 
-## Week 2: Multi-Agent System v2.0
+## System overview
 
-PM Agent hands off to Coder Agent via shared `ProjectState` on a LangGraph StateGraph.
+The system is an autonomous software-development team that takes a single
+natural-language requirement and emits one or more verified Python files.
+Three role-specialised agents collaborate over a shared `ProjectState`:
 
-```
-  START
-    |
-    v
-+-------+      (routing == "coder")     +---------+
-|  pm   | ---------------------------> |  coder  | <-+
-+-------+                               +---------+   |
-    |                                       |         |
-    | (routing == "error")                  |         |
-    v                                       | (routing == "coder", more tasks)
-   END                                      v
-                                     (routing == "done")
-                                            |
-                                            v
-                                           END
-```
+- **PM Agent** turns a requirement into a tech spec and a coding task list.
+- **Coder Agent** implements one task at a time with a ReACT loop and a
+  self-critique pass before submitting.
+- **QA Agent** reviews each artifact, sending the Coder back with structured
+  feedback for up to two retries.
 
-### ProjectState (TypedDict, orchestration/state.py)
+Around the agents sit production-grade primitives: structured logging with
+distributed `run_id` propagation, per-agent token + USD cost tracking, a
+retry-with-backoff decorator, a circuit breaker with the standard three-state
+machine, a pipeline-level timeout watchdog, and a SHA-256 keyed response
+cache. ChromaDB provides long-term semantic memory; an MCP-style adapter
+exposes the file/exec tools through a registry contract; an A2A module
+defines a five-field message schema with a validating broker for peer
+communication.
 
-| Field | Type | Written by | Reducer |
-|---|---|---|---|
-| `user_requirement` | `str` | caller | none |
-| `tech_spec` | `str` | PM | none |
-| `tasks` | `list[CodingTask]` | PM | `operator.add` (append) |
-| `artifacts` | `list[CodingArtifact]` | Coder | `operator.add` (append) |
-| `current_task_index` | `int` | Coder | none |
-| `routing` | `str` | PM, Coder | none (overwrite each turn) |
-| `error` | `str` | PM | none |
+## Pipeline diagram
 
-### PM Agent (agents/pm_agent.py)
+```mermaid
+flowchart TD
+    START([START]) --> PM[PM Agent<br/>spec + tasks]
+    PM -- routing == coder --> CODER[Coder Agent<br/>ReACT + self-reflect]
+    PM -- routing == error --> END_NODE([END])
+    CODER -- routing == qa --> QA[QA Agent<br/>rubric review]
+    QA -- routing == coder<br/>retry / next task --> CODER
+    QA -- routing == done --> END_NODE
 
-- `build_tech_spec(requirement)` — LLM call: requirement -> Markdown spec with five sections (Overview, Functional, Non-Functional, File Structure, Constraints).
-- `decompose_into_tasks(spec)` — LLM call: spec -> JSON task list (strips accidental markdown fences, fills defaults for missing fields, returns `[]` on parse failure).
-- `pm_node(state)` — runs both in sequence, sets `routing="coder"` on success or `"error"` if zero tasks were produced.
-
-### Coder Node (agents/coder_agent.py)
-
-- `coder_node(state)` — picks `tasks[current_task_index]`, instantiates the Week 1 `CoderAgent`, runs it on the formatted task instruction, appends a `CodingArtifact` to state, increments the task index, and sets `routing="coder"` (more tasks) or `"done"` (queue drained).
-
-### Routers (orchestration/graph.py)
-
-- `route_after_pm` — `"coder"` on success, `END` otherwise.
-- `route_after_coder` — `"coder"` to self-loop, `END` when all tasks done.
-
----
-
-## Week 1: Coder Agent v1.0
-
-Single autonomous agent that accepts a natural-language coding task and returns structured, validated output.
-
-```
-User task
-    |
-    v
-+-----------+      +---------+
-|   agent   | <--> |  tools  |
-|  (LLM +   |      |  read   |
-|  ReACT)   |      |  write  |
-+-----------+      |  exec   |
-    |              +---------+
-    |
-    v
-AgentOutput (Pydantic)
-  - code
-  - explanation
-  - plan
-  - result
+    classDef agent fill:#e1f0ff,stroke:#4a90e2,stroke-width:2px
+    classDef terminal fill:#d4edda,stroke:#28a745,stroke-width:2px
+    class PM,CODER,QA agent
+    class START,END_NODE terminal
 ```
 
-### Components
+The graph is a `langgraph.graph.StateGraph` whose nodes are pure-function
+adapters around each agent. Edges are conditional: each node returns a
+`routing` field that the router function reads to decide where the next
+state goes. Self-loops on `coder` (driven by QA verdicts) allow per-task
+retries without growing the graph topology.
 
-| Component | File | Purpose |
-|---|---|---|
-| Coder Agent | `agents/coder_agent.py` | LangGraph StateGraph wrapping an LLM + tool loop |
-| Tools | `tools/` | `read_file`, `write_file`, `exec_python` (subprocess sandbox) |
-| Memory | `memory.py` | Sliding-window short-term + Chroma long-term |
-| Orchestration | `orchestration/graph.py` | StateGraph wiring; entry point |
-| State | `orchestration/state.py` | Pydantic `AgentState` and `AgentOutput` |
+### Coder ⇄ QA review loop
 
-### Loop structure
+```mermaid
+sequenceDiagram
+    participant Coder
+    participant QA
+    Coder->>Coder: ReACT loop (write_file → exec_python)
+    Coder->>Coder: self_reflect(code, result)
+    Coder->>QA: artifact (file + exec_result)
+    QA->>QA: review_artifact(task, artifact)
+    alt review.passed == True
+        QA->>Coder: advance current_task_index
+    else retry_count < 2
+        QA->>Coder: routing=coder + structured feedback
+        Coder->>Coder: re-run with feedback in prompt
+    else retries exhausted
+        QA->>Coder: advance, keep best-effort artifact
+    end
+```
 
-1. System prompt is built from the base prompt plus top-3 memories retrieved by semantic similarity to the task.
-2. The LangGraph agent node calls the LLM. If the LLM produces tool calls, the ToolNode executes them and re-enters the agent node.
-3. The loop terminates when the LLM returns a plain text response (no tool calls) or the iteration counter hits `MAX_ITERATIONS = 10`.
-4. `CoderAgent.run()` extracts the final code, plan, explanation, and execution result from the message log and returns an `AgentOutput`.
+## Agent roles
 
-### Safety
+### PM Agent (`agents/pm_agent.py`)
 
-- Code execution uses `subprocess.run` with a hard 10-second default timeout (clamped to 30s max).
-- Tool outputs are truncated at 2000 characters to protect the context window.
-- All file I/O is confined to the `workspace/` directory.
-
-## Roadmap
-
-| Week | Additions |
+| Responsibility | Detail |
 |---|---|
-| 2 | Product Manager agent, LangGraph handoffs, shared state |
-| 3 | QA & Debugger agent, MCP / A2A protocols |
-| 4 | Observability, cost tracking, error recovery, Docker deployment |
-| 5 | Final polish, full test suite, demo recording |
+| Build tech spec | Single LLM call → Markdown with five required sections (Overview, Functional, Non-Functional, File Structure, Constraints). |
+| Decompose into tasks | Single LLM call → JSON array of `CodingTask` dicts. Tolerates accidental markdown fences; returns `[]` on parse failure (graph routes to error). |
+| Cap task count | If decomposition produces more than `MAX_TASKS_PER_REQUIREMENT` (8) tasks, runs a consolidation pass that merges related items. Falls back to the original list when consolidation is malformed or fails to actually shorten the list. |
+| Optional debate | When `PM_DEBATE_MODE=true`, runs a three-call debate (simplicity advocate + completeness advocate + synthesiser) instead of the single spec call. See [Innovations](#innovations). |
+
+### Coder Agent (`agents/coder_agent.py`)
+
+| Responsibility | Detail |
+|---|---|
+| ReACT loop | LangGraph subgraph: `agent ↔ tools` with `MAX_ITERATIONS = 10`. The agent calls `write_file` then `exec_python` to verify; tool outputs are truncated at 2000 chars to protect the context window. |
+| Self-reflection | Reflexion-style pass after the loop: the model critiques its own code. If `needs_revision=true` and a `revised_code` payload is provided, the artifact is replaced before reaching QA. Critique is appended to `AgentOutput.explanation`. |
+| Memory | Top-3 long-term memories retrieved by cosine similarity on the task string, injected into the system prompt. After every run, a one-line summary (`Task: …\nOutcome: …`) is stored back. |
+| QA-feedback retries | When the prior turn failed QA, the next instruction includes the review's `issues` and `suggestions` so the model can fix them concretely. |
+
+### QA Agent (`agents/qa_agent.py`)
+
+| Responsibility | Detail |
+|---|---|
+| Rubric review | Single LLM call → `QAReview` JSON: `passed`, `issues`, `suggestions`, `summary`. Reviewers four axes: correctness, safety, style, execution. |
+| Routing decision | Pass → advance task index. Fail with retries available → loop back to Coder. Fail with retries exhausted → advance, preserve best-effort artifact. |
+| Graceful degradation | Malformed review JSON defaults to `passed=true` with a clear summary so a transient parse failure doesn't block forward progress. |
+
+## Shared state (`ProjectState`)
+
+```python
+class ProjectState(TypedDict):
+    user_requirement:   str                            # Input
+    tech_spec:          str                            # PM → state
+    tasks:              Annotated[list[CodingTask], add]
+    artifacts:          Annotated[list[CodingArtifact], add]
+    reviews:            Annotated[list[QAReview], add]
+    current_task_index: int
+    retry_count:        int
+    routing:            str
+    error:              str
+    run_id:             str
+```
+
+Three list fields use `operator.add` as a reducer — LangGraph appends new
+items to the existing list rather than overwriting, which is what makes the
+QA-then-coder loop safe under partial state updates. Scalar fields
+(`current_task_index`, `retry_count`, `routing`) are overwritten each turn.
+
+## Cross-cutting concerns
+
+| Concern | Module | What it gives you |
+|---|---|---|
+| Logging | `observability/logging.py` | JSON formatter; per-agent loggers; `bind_run_context` for trace correlation. |
+| Tracing | `observability/tracing.py` | `new_run_id()`; `trace_span` context manager that emits `span_start` / `span_end` / `span_error` log events with duration. |
+| Cost | `observability/cost.py` | `TokenUsage` dataclass; `CostTracker` aggregator; per-run registry (`tracker_for(run_id)`); `write_report(run_id, dir)` writes a per-run JSON to `docs/cost_reports/`. |
+| Retry | `resilience/retry.py` | `retry_with_backoff` decorator with full jitter; retries `TransientError` only — `PermanentError` short-circuits. |
+| Circuit breaker | `resilience/circuit_breaker.py` | CLOSED / OPEN / HALF-OPEN state machine; configurable `failure_threshold` and `cool_down`; raises `DegradableError` while open. |
+| Timeout | `resilience/timeout.py` | `with_timeout(callable, timeout_s)` watchdog. |
+| Caching | `caching/response_cache.py` | SHA-256 keyed cache with TTL; tracks hits/misses for hit-rate measurement. |
+| Memory | `memory.py` | `SlidingWindowBuffer` (FIFO short-term) + `SemanticMemory` (Chroma; auto-detects `CHROMA_HOST` env var to use HttpClient under Docker). |
+| MCP adapter | `tools/mcp_adapter.py` | `TOOL_REGISTRY` + `list_tools()` + `call_tool(name, args)`; in-process equivalent of MCP's `tools/list` + `tools/call`. |
+| A2A protocol | `orchestration/a2a.py` | Five-field `Message` dataclass with sender/intent validation; `Broker` with per-agent `asyncio.Queue`; `AGENT_CAPABILITIES` advertisement; `validate_incoming` trust-boundary check. |
+
+## Innovations
+
+### Innovation 1 — Cost optimisation with measured data
+
+Per-agent model selection is configurable via `config.AGENT_MODELS` and per-
+agent env vars (`MODEL_PM`, `MODEL_CODER`, `MODEL_QA`). A baseline run with
+all agents on `gpt-4o` is compared to a tuned run with PM on `gpt-4o` and
+Coder/QA on `gpt-4o-mini`; results are captured under
+`docs/cost_reports/<run_id>.json` and summarised in `docs/test_results.md`.
+The tracker also records cached prompt tokens (when the provider returns
+`prompt_tokens_details.cached_tokens`) so cost reductions from response
+cache hits show up explicitly.
+
+### Innovation 2 — PM debate / consensus layer
+
+When `PM_DEBATE_MODE=true`, the PM phase runs three LLM calls instead of
+one (`agents/pm_debate.py`):
+
+1. *Advocate for simplicity* — drafts the leanest possible spec.
+2. *Advocate for completeness* — drafts a spec that resolves every edge case.
+3. *Synthesiser* — reads both drafts and produces a single spec, with inline
+   notes explaining where the two were merged or where one was preferred.
+
+The synthesised spec then flows into the same `decompose_into_tasks` call as
+the standard path. On ambiguous requirements the debate produces noticeably
+better-justified specs (the synthesiser's "## Synthesis notes" subsection
+makes the trade-offs auditable). Disabled by default so single-call cost
+remains the floor.
+
+## Framework justification
+
+Three frameworks were realistic candidates for this project: **LangGraph**,
+**AutoGen**, and **CrewAI**.
+
+| Criterion | LangGraph | AutoGen | CrewAI |
+|---|---|---|---|
+| Inspectable control flow | Explicit nodes + edges; conditional routing is a function on state. | Implicit through chat-room dynamics. | Role-and-task model is opinionated but less explicit per-edge. |
+| Tool-calling ergonomics | First-class `ToolNode` + `bind_tools`. | Function-calling supported but framework adds extra layers. | Tool integration via `@tool` decorator. |
+| Distributed tracing fit | LangSmith integration is native; `@traceable` wrappers are trivial. | Possible but requires more glue. | Possible but less mature. |
+| Course alignment | Course Week 2 builds the multi-agent graph in LangGraph. | Out-of-scope for this course. | Out-of-scope for this course. |
+| Maturity / Python-native | Stable Python API; small surface area. | Mature; broader scope. | Newer; smaller community. |
+
+**LangGraph wins on three axes that mattered most for this capstone**:
+inspectable control flow (every edge is debuggable), tool-calling ergonomics
+(no parser code), and direct fit to the course material. The decision held
+up through Weeks 2–5: adding the QA agent in Week 3, the production
+primitives in Week 4, and the polish in Week 5 each touched only the
+graph builder and one agent module.
+
+The trade-off is that LangGraph's state-reducer model demands more thought
+than AutoGen's chat room. The reducer for `tasks: Annotated[list, add]` is
+load-bearing — if it were a plain `list`, the QA-then-coder loop would
+overwrite the task list each turn and the pipeline would deadlock. Catching
+that is what makes LangGraph's explicitness an advantage rather than a
+ceremony.
+
+## Operational topology
+
+```mermaid
+flowchart LR
+    subgraph host["Local host / CI"]
+        py[python -m orchestration.graph]
+    end
+    subgraph compose["docker-compose"]
+        agent["coder-agent<br/>non-root, healthcheck"]
+        chroma["chromadb/chroma:0.5.20<br/>persistent volume"]
+        agent -- depends_on:<br/>service_healthy --> chroma
+    end
+    subgraph external["External"]
+        helicone["Helicone proxy"]
+        openrouter["OpenRouter / OpenAI"]
+        langsmith["LangSmith"]
+    end
+
+    py -- direct --> helicone
+    agent -- env: HELICONE_BASE_URL --> helicone
+    helicone --> openrouter
+    py -.optional.-> langsmith
+    agent -.optional.-> langsmith
+```
+
+- The agent container runs as a non-root `agent` user with a healthcheck that
+  imports the compiled graph (so an unhealthy install fails fast).
+- The Chroma container holds long-term semantic memory in a named volume
+  (`chroma-data`) so memory survives `docker compose down` (without `-v`).
+- `docs/cost_reports/` is bind-mounted into the agent container so reports
+  produced inside Docker show up on the host filesystem.
+- LangSmith tracing is opt-in: set `LANGCHAIN_TRACING_V2=true` and the
+  related `LANGCHAIN_*` env vars, and every node will appear as a span under
+  one root run.
+
+---
+
+*Last updated: Week 5 polish (2026-05-01). For the chronological week-by-week
+record, see the README's "Previous milestone" sections. For run cost data,
+see `docs/cost_reports/`. For the post-mortem, see `docs/REFLECTION.md`.*

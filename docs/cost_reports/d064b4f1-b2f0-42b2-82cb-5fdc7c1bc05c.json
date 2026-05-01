@@ -1,0 +1,22 @@
+{
+  "run_id": "d064b4f1-b2f0-42b2-82cb-5fdc7c1bc05c",
+  "by_agent": {
+    "pm": {
+      "prompt": 708,
+      "completion": 931,
+      "cost_usd": 0.01108
+    },
+    "coder": {
+      "prompt": 64466,
+      "completion": 9081,
+      "cost_usd": 0.01512
+    },
+    "qa": {
+      "prompt": 3288,
+      "completion": 307,
+      "cost_usd": 0.00068
+    }
+  },
+  "total_tokens": 78781,
+  "total_cost_usd": 0.02688
+}

@@ -15,7 +15,7 @@ A2A protocol bridge; the tool functions themselves don't have to change.
 
 from __future__ import annotations
 
-from typing import Any, Callable, TypedDict
+from typing import Any, TypedDict
 
 from tools.code_executor import exec_python
 from tools.file_io import read_file, write_file

@@ -16,10 +16,20 @@ from langgraph.graph import END, START, StateGraph
 from agents.coder_agent import CoderAgent, build_coder_graph, coder_node
 from agents.pm_agent import pm_node
 from agents.qa_agent import qa_node
-from observability import get_logger, new_run_id, trace_span
+from observability import get_logger, new_run_id, trace_span, write_report
 from orchestration.state import ProjectState
 
-__all__ = ["CoderAgent", "build_coder_graph", "build_graph", "create_graph"]
+# Cost reports for every pipeline run land here. The directory is created
+# on first write so the repo stays clean when no runs have happened yet.
+COST_REPORTS_DIR = "docs/cost_reports"
+
+__all__ = [
+    "CoderAgent",
+    "COST_REPORTS_DIR",
+    "build_coder_graph",
+    "build_graph",
+    "create_graph",
+]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -113,6 +123,14 @@ if __name__ == "__main__":
         artifacts=len(final.get("artifacts", [])),
         reviews=len(final.get("reviews", [])),
     )
+
+    # Auto-write the per-run cost report. Skipped silently if no LLM calls
+    # were recorded for this run_id (e.g., a pure unit test invocation).
+    cost_path = write_report(run_id, COST_REPORTS_DIR)
+    if cost_path is not None:
+        log.info("cost_report_written", path=str(cost_path))
+        print()
+        print(f"Cost report: {cost_path}")
 
     print("=" * 60)
     print("TECH SPEC")

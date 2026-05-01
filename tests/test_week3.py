@@ -19,12 +19,10 @@ from orchestration.a2a import (
 from orchestration.graph import (
     build_graph,
     route_after_coder,
-    route_after_pm,
     route_after_qa,
 )
 from orchestration.state import ProjectState
 from tools.mcp_adapter import TOOL_REGISTRY, call_tool, list_tools
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -300,6 +298,7 @@ class TestMCPAdapter:
     def test_call_tool_write_and_read_roundtrip(self, tmp_path, monkeypatch):
         # Point WORKSPACE at a tmp_path so this test is isolated from the repo.
         from pathlib import Path
+
         import tools.file_io as fio
         monkeypatch.setattr(fio, "WORKSPACE", Path(tmp_path))
         write_result = call_tool("write_file", {"path": "greet.py", "content": "print('hi')\n"})

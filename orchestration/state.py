@@ -12,7 +12,6 @@ from typing import Annotated, Any, Optional, TypedDict
 
 from pydantic import BaseModel, Field
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Week 1 — single-agent output schema
 # ─────────────────────────────────────────────────────────────────────────────

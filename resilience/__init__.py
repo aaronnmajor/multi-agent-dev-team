@@ -1,6 +1,6 @@
-from .retry import retry_with_backoff
 from .circuit_breaker import CircuitBreaker, CircuitState
-from .timeout import with_timeout, PipelineTimeoutError
+from .retry import retry_with_backoff
+from .timeout import PipelineTimeoutError, with_timeout
 
 __all__ = [
     "retry_with_backoff",

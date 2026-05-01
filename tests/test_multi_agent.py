@@ -9,12 +9,9 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from agents.pm_agent import build_tech_spec, decompose_into_tasks, pm_node
 from orchestration.graph import build_graph, route_after_coder, route_after_pm
-from orchestration.state import CodingTask, ProjectState
-
+from orchestration.state import ProjectState
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers

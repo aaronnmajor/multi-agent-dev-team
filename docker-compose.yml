@@ -1,9 +1,36 @@
 services:
+  chroma:
+    image: chromadb/chroma:0.5.20
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma-data:/chroma/chroma
+    environment:
+      IS_PERSISTENT: "TRUE"
+      ANONYMIZED_TELEMETRY: "FALSE"
+    healthcheck:
+      test: ["CMD", "/bin/bash", "-c", "cat < /dev/null > /dev/tcp/localhost/8000"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    restart: unless-stopped
+
   coder-agent:
     build: .
     env_file: .env
+    environment:
+      CHROMA_HOST: chroma
+      CHROMA_PORT: "8000"
+    depends_on:
+      chroma:
+        condition: service_healthy
     volumes:
       - ./workspace:/app/workspace
       - ./logs:/app/logs
+      - ./docs/cost_reports:/app/docs/cost_reports
     command: python -m orchestration.graph
     restart: "no"
+
+volumes:
+  chroma-data:

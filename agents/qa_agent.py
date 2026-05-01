@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from config import get_model
-from observability import get_logger, trace_span
+from observability import get_logger, record_usage_from_response, trace_span
 from orchestration.state import ProjectState, QAReview
 
 load_dotenv(override=True)
@@ -63,11 +63,9 @@ If the code runs and mostly does the job, you may still flag improvements but se
 """
 
 
-def review_artifact(task: dict, artifact: dict, client: OpenAI | None = None) -> QAReview:
-    """Run a single QA review on one artifact. Returns a QAReview dict."""
-    client = client or _client()
-
-    user_message = (
+def _format_review_message(task: dict, artifact: dict) -> str:
+    """Format the user-message payload sent to the QA reviewer."""
+    return (
         f"Task:\n"
         f"  ID: {task.get('task_id', '')}\n"
         f"  Title: {task.get('title', '')}\n"
@@ -80,37 +78,50 @@ def review_artifact(task: dict, artifact: dict, client: OpenAI | None = None) ->
         f"  Execution result:\n{artifact.get('exec_result', '')}\n"
     )
 
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": REVIEW_PROMPT},
-            {"role": "user", "content": user_message},
-        ],
-    )
-    raw = (response.choices[0].message.content or "").strip()
+
+def _parse_review_payload(raw: str, task_id: str) -> QAReview:
+    """Parse the JSON review payload. Defaults to pass on parse failure."""
+    raw = raw.strip()
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[1] if "\n" in raw else raw
         raw = raw.rsplit("```", 1)[0].strip()
-
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
-        # Default to pass on parse failure so we don't block on a bad response.
         return {
-            "task_id":     task.get("task_id", ""),
+            "task_id":     task_id,
             "passed":      True,
             "issues":      [],
             "suggestions": [],
             "summary":     "QA review produced malformed JSON; defaulting to pass.",
         }
-
     return {
-        "task_id":     task.get("task_id", ""),
+        "task_id":     task_id,
         "passed":      bool(parsed.get("passed", True)),
         "issues":      list(parsed.get("issues", [])),
         "suggestions": list(parsed.get("suggestions", [])),
         "summary":     str(parsed.get("summary", "")),
     }
+
+
+def review_artifact(
+    task: dict,
+    artifact: dict,
+    client: OpenAI | None = None,
+    run_id: str = "",
+) -> QAReview:
+    """Run a single QA review on one artifact. Returns a QAReview dict."""
+    client = client or _client()
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": REVIEW_PROMPT},
+            {"role": "user", "content": _format_review_message(task, artifact)},
+        ],
+    )
+    record_usage_from_response(run_id, "qa", MODEL, response)
+    raw = response.choices[0].message.content or ""
+    return _parse_review_payload(raw, task.get("task_id", ""))
 
 
 def qa_node(state: ProjectState) -> dict[str, Any]:
@@ -137,7 +148,7 @@ def qa_node(state: ProjectState) -> dict[str, Any]:
 
     run_id = state.get("run_id", "")
     with trace_span("qa", "qa_review", run_id, task_id=task_id):
-        review = review_artifact(task, latest)
+        review = review_artifact(task, latest, run_id=run_id)
     _log.info(
         "qa_review_complete",
         run_id=run_id,

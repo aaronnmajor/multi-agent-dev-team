@@ -2,7 +2,9 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.ruff_cache/
 workspace/
+logs/
 .vscode/
 .idea/
 *.egg-info/

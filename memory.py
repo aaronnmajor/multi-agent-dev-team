@@ -14,7 +14,7 @@ from collections import deque
 from typing import Any
 
 import chromadb
-from chromadb import EmbeddingFunction, Documents, Embeddings
+from chromadb import Documents, EmbeddingFunction, Embeddings
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -35,9 +35,23 @@ helicone_client = OpenAI(
 
 
 class HeliconeEmbeddingFunction(EmbeddingFunction):
+    """Embedding function that routes through the Helicone proxy.
+
+    Implements the small required surface for Chroma's EmbeddingFunction
+    contract (``__init__``, ``__call__``, ``name``) so the deprecation
+    warnings don't fire on newer Chroma versions.
+    """
+
+    def __init__(self, model: str = "text-embedding-3-small") -> None:
+        self.model = model
+
+    @staticmethod
+    def name() -> str:
+        return "helicone"
+
     def __call__(self, input: Documents) -> Embeddings:
         response = helicone_client.embeddings.create(
-            model="text-embedding-3-small",
+            model=self.model,
             input=input,
         )
         return [item.embedding for item in response.data]
@@ -65,10 +79,21 @@ class SlidingWindowBuffer:
 
 
 class SemanticMemory:
-    """ChromaDB-backed long-term store with cosine-similarity retrieval."""
+    """ChromaDB-backed long-term store with cosine-similarity retrieval.
+
+    When ``CHROMA_HOST`` is set in the environment (e.g., from docker-compose
+    where a chroma service is running), connects via the HTTP client so memory
+    persists across pipeline runs. Otherwise falls back to an in-process
+    Client, which keeps unit tests fast and avoids a network dependency.
+    """
 
     def __init__(self, collection_name: str = "coder_agent_memory") -> None:
-        self._client = chromadb.Client()
+        chroma_host = os.getenv("CHROMA_HOST")
+        if chroma_host:
+            chroma_port = int(os.getenv("CHROMA_PORT", "8000"))
+            self._client = chromadb.HttpClient(host=chroma_host, port=chroma_port)
+        else:
+            self._client = chromadb.Client()
         self._collection = self._client.get_or_create_collection(
             name=collection_name,
             embedding_function=HeliconeEmbeddingFunction(),

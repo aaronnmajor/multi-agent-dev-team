@@ -14,7 +14,6 @@ import pytest
 from agents.coder_agent import CoderAgent
 from orchestration.state import AgentOutput
 
-
 SMOKE_TASK = (
     "Write a one-line Python script to workspace/hello.py that prints 'hello from smoke test'. "
     "Then execute it with exec_python and report the output."

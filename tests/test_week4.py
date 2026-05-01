@@ -14,12 +14,11 @@ from caching.response_cache import ResponseCache
 from config import AGENT_MODELS, get_model
 from exceptions import AgentError, DegradableError, PermanentError, TransientError
 from observability.cost import MODEL_PRICES, CostTracker, TokenUsage
-from observability.logging import JSONFormatter, get_logger
+from observability.logging import JSONFormatter
 from observability.tracing import new_run_id, trace_span
 from resilience.circuit_breaker import CircuitBreaker, CircuitState
 from resilience.retry import retry_with_backoff
 from resilience.timeout import PipelineTimeoutError, with_timeout
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Exception hierarchy

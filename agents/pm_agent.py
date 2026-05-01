@@ -17,14 +17,21 @@ from typing import Any
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from agents.pm_debate import is_enabled as _debate_enabled
+from agents.pm_debate import propose_spec_with_debate
 from config import get_model
-from observability import get_logger, trace_span
+from observability import get_logger, record_usage_from_response, trace_span
 from orchestration.state import CodingTask, ProjectState
 
 load_dotenv(override=True)
 
 MODEL = get_model("pm")
 _log = get_logger("pm")
+
+# Hard ceiling on the task list. If the PM emits more than this, a
+# consolidation pass is run to merge closely-related items. Prevents the
+# pipeline from devolving into a long fan-out for sprawling specs.
+MAX_TASKS_PER_REQUIREMENT = 8
 
 
 def _client() -> OpenAI:
@@ -73,11 +80,34 @@ Each object must have exactly these fields:
 }
 
 Task IDs are sequential (T001, T002, ...). Tasks should be ordered so that each task only depends on prior tasks.
-Aim for 2-5 tasks unless the spec is genuinely larger.
+Aim for 2-5 tasks unless the spec is genuinely larger. Never produce more than 8 tasks.
 """
 
 
-def build_tech_spec(requirement: str, client: OpenAI | None = None) -> str:
+CONSOLIDATE_PROMPT = """You are a Product Manager consolidating an overgrown task list.
+
+The previous decomposition produced too many tasks. Merge closely-related items so the final list has 8 or fewer tasks while preserving every acceptance criterion. Combine adjacent tasks that touch the same file or that a single coder turn could complete together.
+
+Output a JSON array of coding task objects with the SAME schema as before:
+
+{
+  "task_id": "T001",
+  "title": "short title",
+  "description": "what the coder must implement",
+  "acceptance_criteria": "how to verify it is done",
+  "status": "pending",
+  "file": "relative filename the coder should create"
+}
+
+Renumber task_ids sequentially from T001. Output ONLY the JSON array — no fences, no commentary.
+"""
+
+
+def build_tech_spec(
+    requirement: str,
+    client: OpenAI | None = None,
+    run_id: str = "",
+) -> str:
     """Convert a raw requirement into a Markdown tech spec."""
     client = client or _client()
     response = client.chat.completions.create(
@@ -87,10 +117,42 @@ def build_tech_spec(requirement: str, client: OpenAI | None = None) -> str:
             {"role": "user", "content": f"Requirement:\n\n{requirement}"},
         ],
     )
+    record_usage_from_response(run_id, "pm", MODEL, response)
     return response.choices[0].message.content or ""
 
 
-def decompose_into_tasks(tech_spec: str, client: OpenAI | None = None) -> list[CodingTask]:
+def _parse_task_list(raw: str) -> list[CodingTask]:
+    """Parse a JSON array of CodingTask dicts, tolerating markdown fences."""
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[1] if "\n" in raw else raw
+        raw = raw.rsplit("```", 1)[0].strip()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    tasks: list[CodingTask] = []
+    for i, item in enumerate(parsed, start=1):
+        if not isinstance(item, dict):
+            continue
+        tasks.append({
+            "task_id":             item.get("task_id", f"T{i:03d}"),
+            "title":               item.get("title", ""),
+            "description":         item.get("description", ""),
+            "acceptance_criteria": item.get("acceptance_criteria", ""),
+            "status":              item.get("status", "pending"),
+            "file":                item.get("file", ""),
+        })
+    return tasks
+
+
+def decompose_into_tasks(
+    tech_spec: str,
+    client: OpenAI | None = None,
+    run_id: str = "",
+) -> list[CodingTask]:
     """Convert a tech spec into a list of coding tasks."""
     client = client or _client()
     response = client.chat.completions.create(
@@ -100,30 +162,37 @@ def decompose_into_tasks(tech_spec: str, client: OpenAI | None = None) -> list[C
             {"role": "user", "content": f"Tech spec:\n\n{tech_spec}"},
         ],
     )
-    raw = (response.choices[0].message.content or "").strip()
-    # Strip accidental markdown fences.
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1] if "\n" in raw else raw
-        raw = raw.rsplit("```", 1)[0].strip()
-    try:
-        parsed = json.loads(raw)
-        if not isinstance(parsed, list):
-            return []
-        tasks: list[CodingTask] = []
-        for i, item in enumerate(parsed, start=1):
-            if not isinstance(item, dict):
-                continue
-            tasks.append({
-                "task_id":             item.get("task_id", f"T{i:03d}"),
-                "title":               item.get("title", ""),
-                "description":         item.get("description", ""),
-                "acceptance_criteria": item.get("acceptance_criteria", ""),
-                "status":              item.get("status", "pending"),
-                "file":                item.get("file", ""),
-            })
+    record_usage_from_response(run_id, "pm", MODEL, response)
+    raw = response.choices[0].message.content or ""
+    return _parse_task_list(raw)
+
+
+def consolidate_tasks(
+    tasks: list[CodingTask],
+    client: OpenAI | None = None,
+    run_id: str = "",
+) -> list[CodingTask]:
+    """Compress an overgrown task list down to MAX_TASKS_PER_REQUIREMENT items.
+
+    If the PM's first decomposition exceeds the cap, this runs a second LLM
+    pass with a consolidation prompt. The original list is returned unchanged
+    when the LLM fails to produce a valid (and shorter) list, so a malformed
+    consolidation never silently drops tasks.
+    """
+    client = client or _client()
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": CONSOLIDATE_PROMPT},
+            {"role": "user", "content": f"Original task list (JSON):\n{json.dumps(tasks, indent=2)}"},
+        ],
+    )
+    record_usage_from_response(run_id, "pm", MODEL, response)
+    raw = response.choices[0].message.content or ""
+    consolidated = _parse_task_list(raw)
+    if not consolidated or len(consolidated) >= len(tasks):
         return tasks
-    except json.JSONDecodeError:
-        return []
+    return consolidated
 
 
 def pm_node(state: ProjectState) -> dict[str, Any]:
@@ -137,10 +206,21 @@ def pm_node(state: ProjectState) -> dict[str, Any]:
 
     with trace_span("pm", "pm_node", run_id):
         client = _client()
-        with trace_span("pm", "build_tech_spec", run_id):
-            spec = build_tech_spec(requirement, client=client)
+        if _debate_enabled():
+            with trace_span("pm", "spec_debate", run_id):
+                debate = propose_spec_with_debate(
+                    requirement, model=MODEL, client=client, run_id=run_id,
+                )
+            spec = debate["spec"]
+        else:
+            with trace_span("pm", "build_tech_spec", run_id):
+                spec = build_tech_spec(requirement, client=client, run_id=run_id)
         with trace_span("pm", "decompose_into_tasks", run_id):
-            tasks = decompose_into_tasks(spec, client=client)
+            tasks = decompose_into_tasks(spec, client=client, run_id=run_id)
+        if len(tasks) > MAX_TASKS_PER_REQUIREMENT:
+            with trace_span("pm", "consolidate_tasks", run_id, original_count=len(tasks)):
+                tasks = consolidate_tasks(tasks, client=client, run_id=run_id)
+            _log.info("pm_consolidated", run_id=run_id, final_count=len(tasks))
 
     if not tasks:
         _log.error("pm_zero_tasks", run_id=run_id)

@@ -1,5 +1,12 @@
-from .logging import get_logger, configure_logging, bind_run_context
-from .cost import CostTracker, TokenUsage, MODEL_PRICES
+from .cost import (
+    MODEL_PRICES,
+    CostTracker,
+    TokenUsage,
+    record_usage_from_response,
+    tracker_for,
+    write_report,
+)
+from .logging import bind_run_context, configure_logging, get_logger
 from .tracing import new_run_id, trace_span
 
 __all__ = [
@@ -9,6 +16,9 @@ __all__ = [
     "CostTracker",
     "TokenUsage",
     "MODEL_PRICES",
+    "record_usage_from_response",
+    "tracker_for",
+    "write_report",
     "new_run_id",
     "trace_span",
 ]
